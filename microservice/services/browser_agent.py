@@ -1,5 +1,11 @@
 import asyncio
 import os
+import sys
+from pathlib import Path
+
+# Add the parent directory to the Python path so we can import browser_use
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
 from browser_use import Agent
 from langchain_openai import ChatOpenAI
 from utils.logger import setup_logger

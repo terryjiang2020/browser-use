@@ -9,7 +9,7 @@ echo "🚀 Setting up browser-use microservice..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-cd "$PROJECT_DIR"
+cd "$SCRIPT_DIR"
 
 # Install Node.js and PM2 if not installed
 if ! command -v node &> /dev/null; then
@@ -51,9 +51,13 @@ pip install --upgrade pip
 echo "Installing Python dependencies..."
 pip install -r requirements.txt
 
+# Install browser-use from local source in development mode
+echo "Installing browser-use from local source..."
+pip install -e "$PROJECT_DIR"
+
 # Install playwright browsers
 echo "Installing Playwright browsers..."
-playwright install chromium --with-deps --no-shell
+python -m playwright install chromium
 
 # Create logs directory
 mkdir -p logs
