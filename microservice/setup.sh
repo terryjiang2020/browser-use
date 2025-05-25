@@ -38,7 +38,18 @@ fi
 # Create virtual environment if it doesn't exist
 if [ ! -d "venv" ]; then
     echo "Creating Python virtual environment..."
-    python3 -m venv venv
+    # Try to use Python 3.11+ for browser-use compatibility
+    if command -v python3.11 &> /dev/null; then
+        python3.11 -m venv venv
+    elif command -v python3.12 &> /dev/null; then
+        python3.12 -m venv venv
+    elif command -v python3.13 &> /dev/null; then
+        python3.13 -m venv venv
+    else
+        echo "❌ Error: browser-use requires Python 3.11 or higher"
+        echo "Please install Python 3.11+ and try again"
+        exit 1
+    fi
 fi
 
 # Activate virtual environment
