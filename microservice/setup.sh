@@ -53,7 +53,7 @@ pip install -r requirements.txt
 
 # Install browser-use from local source in development mode
 echo "Installing browser-use from local source..."
-pip install -e "$PROJECT_DIR"
+pip install -e ..
 
 # Install playwright browsers
 echo "Installing Playwright browsers..."

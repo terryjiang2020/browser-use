@@ -1,16 +1,16 @@
 module.exports = {
   apps: [{
     name: 'browser-use-api',
-    script: 'venv/bin/python',
+    script: './venv/bin/python',
     args: '-m uvicorn app:app --host 0.0.0.0 --port 8000',
-    cwd: '/Users/jiangjiahao/Documents/GitHub/browser-use/microservice',
+    cwd: process.cwd(),
     instances: 1,
     autorestart: true,
     watch: false,
     max_memory_restart: '1G',
     env: {
       NODE_ENV: 'production',
-      PYTHONPATH: '/Users/jiangjiahao/Documents/GitHub/browser-use/microservice:/Users/jiangjiahao/Documents/GitHub/browser-use'
+      PYTHONPATH: `${process.cwd()}:${process.cwd()}/../`
     },
     error_file: './logs/error.log',
     out_file: './logs/out.log',
