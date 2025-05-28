@@ -268,7 +268,7 @@ AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
 AWS_REGION=us-east-1
 SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/account/queue-name
-S3_BUCKET_NAME=your-bucket-name
+AWS_S3_BUCKET=your-bucket-name
 
 # LLM Configuration (choose one)
 OPENAI_API_KEY=your_openai_key
@@ -312,26 +312,31 @@ Scanning results use the same API callback format as automation results, ensurin
 ## Best Practices
 
 ### 1. Timeout Management
+
 - Set appropriate timeouts based on scan complexity
 - Full scans typically need 5-10 minutes
 - Simple content scans can complete in 1-2 minutes
 
 ### 2. Rate Limiting
+
 - Be mindful of target website rate limits
 - Consider implementing delays between scans of the same domain
 - Use the `MAX_CONCURRENT_TASKS` setting to control concurrency
 
 ### 3. Error Handling
+
 - Monitor scan failures and adjust timeouts accordingly
 - Failed scans are automatically removed from the queue to prevent infinite retries
 - Check API callbacks for error status
 
 ### 4. Data Volume
+
 - Large websites may generate substantial scan data
 - Consider scan type selection based on your specific needs
 - Use custom selectors to focus on relevant data
 
 ### 5. Privacy and Legal
+
 - Ensure you have permission to scan target websites
 - Respect robots.txt and terms of service
 - Consider data privacy implications of extracted content
@@ -339,6 +344,7 @@ Scanning results use the same API callback format as automation results, ensurin
 ## Monitoring and Debugging
 
 ### Logs
+
 The scanning service provides detailed logging for monitoring and debugging:
 
 ```
