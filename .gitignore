@@ -12,6 +12,10 @@ __pycache__/
 .venv
 venv/
 
+# Environmental variables
+.env
+.env.*
+
 # IDEs
 .vscode/
 .idea/
