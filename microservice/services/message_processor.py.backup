@@ -1,0 +1,355 @@
+"""
+Message processor for handling SQS messages and orchestrating the browser automation workflow
+"""
+import asyncio
+import logging
+import os
+from typing import Dict, Optional
+from datetime import datetime
+
+from services.sqs_service import SQSService
+from services.s3_service import S3Service
+from services.api_client import APIClientService
+from services.browser_agent import BrowserAgentService
+from services.website_scanner import WebsiteScanner
+from utils.logger import setup_logger
+
+logger = setup_logger()
+
+class MessageProcessor:
+    def __init__(self):
+        """Initialize all services"""
+        self.sqs_service = SQSService()
+        self.s3_service = S3Service()
+        self.api_client = APIClientService()
+        self.max_concurrent_tasks = int(os.getenv('MAX_CONCURRENT_TASKS', '5'))
+        self.running = False
+        
+        logger.info("Message processor initialized")
+
+    async def start_processing(self):
+        """Start processing messages from SQS"""
+        self.running = True
+        logger.info("Starting SQS message processing...")
+        
+        # Create a semaphore to limit concurrent tasks
+        semaphore = asyncio.Semaphore(self.max_concurrent_tasks)
+        
+        while self.running:
+            try:
+                # Poll for messages
+                messages = await self.sqs_service.poll_messages(
+                    max_messages=min(self.max_concurrent_tasks, 10),
+                    wait_time=20
+                )
+                
+                if not messages:
+                    logger.debug("No messages received, continuing to poll...")
+                    continue
+                
+                # Process messages concurrently
+                tasks = []
+                for message in messages:
+                    task = asyncio.create_task(
+                        self._process_message_with_semaphore(semaphore, message)
+                    )
+                    tasks.append(task)
+                
+                # Wait for all tasks to complete
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                
+            except Exception as e:
+                logger.error(f"Error in message processing loop: {str(e)}")
+                await asyncio.sleep(5)  # Wait before retrying
+
+    async def _process_message_with_semaphore(self, semaphore: asyncio.Semaphore, message: Dict):
+        """Process a single message with concurrency control"""
+        async with semaphore:
+            await self._process_message(message)
+
+    async def _process_message(self, message: Dict):
+        """Process a single SQS message"""
+        project_id = message['project_id']
+        flow_id = message['flow_id']
+        url = message['url']
+        receipt_handle = message['receipt_handle']
+        
+        # Check if this is a scanning task or regular automation task
+        message_type = message.get('type', 'automation')  # Default to automation for backward compatibility
+        
+        logger.info(f"Processing {message_type} message for project {project_id}, flow {flow_id}")
+        
+        try:
+            # Send initial status update
+            await self.api_client.send_status_update(
+                project_id, flow_id, 'started', 
+                message=f'{message_type.capitalize()} task started'
+            )
+            
+            if message_type == 'scan':
+                await self._process_scanning_message(message)
+            else:
+                await self._process_automation_message(message)
+                
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Error processing {message_type} message for project {project_id}, flow {flow_id}: {error_msg}")
+            
+            try:
+                # Send error status to API
+                await self.api_client.send_session_result(
+                    project_id=project_id,
+                    flow_id=flow_id,
+                    agent_history=[{
+                        'timestamp': datetime.now().isoformat(),
+                        'type': 'error',
+                        'content': f'Task failed: {error_msg}'
+                    }],
+                    s3_urls=[],
+                    status='failed',
+                    error=error_msg,
+                    metadata={
+                        'starting_url': url,
+                        'task_type': message_type
+                    }
+                )
+                
+                # Delete message from SQS even on failure to prevent infinite retries
+                await self.sqs_service.delete_message(receipt_handle)
+                
+            except Exception as api_error:
+                logger.error(f"Failed to send error status to API: {str(api_error)}")
+
+    async def _process_scanning_message(self, message: Dict):
+        """Process a website scanning message"""
+        project_id = message['project_id']
+        flow_id = message['flow_id']
+        url = message['url']
+        receipt_handle = message['receipt_handle']
+        
+        # Extract scanning parameters
+        scan_type = message.get('scan_type', 'full')
+        custom_selectors = message.get('custom_selectors', [])
+        extract_goals = message.get('extract_goals', [])
+        timeout = int(message.get('timeout', 300))
+        
+        try:
+            # Initialize browser agent to get LLM
+            browser_agent = BrowserAgentService()
+            
+            # Initialize website scanner
+            scanner = WebsiteScanner(browser_agent.llm)
+            
+            await self.api_client.send_status_update(
+                project_id, flow_id, 'in_progress', progress=20,
+                message=f'Starting {scan_type} scan'
+            )
+            
+            # Perform the scan
+            scan_results = await scanner.perform_comprehensive_scan(
+                url=url,
+                scan_type=scan_type,
+                custom_selectors=custom_selectors,
+                extract_goals=extract_goals,
+                timeout=timeout
+            )
+            
+            await self.api_client.send_status_update(
+                project_id, flow_id, 'in_progress', progress=70,
+                message='Scan completed, processing results'
+            )
+            
+            # Upload screenshot if available
+            s3_urls = []
+            if scan_results.get('screenshot_path'):
+                upload_results = await self.s3_service.upload_multiple_files(
+                    file_paths=[scan_results['screenshot_path']],
+                    project_id=project_id,
+                    flow_id=flow_id,
+                    metadata={
+                        'scan_type': scan_type,
+                        'scanned_url': url,
+                        'completion_time': datetime.now().isoformat()
+                    }
+                )
+                
+                s3_urls = [result['s3_url'] for result in upload_results if result['s3_url']]
+            
+            await self.api_client.send_status_update(
+                project_id, flow_id, 'in_progress', progress=90,
+                message='Sending scan results to API'
+            )
+            
+            # Format scan results as agent history
+            agent_history = [{
+                'timestamp': scan_results['timestamp'],
+                'type': 'scan_completion',
+                'content': f'Website scan completed successfully',
+                'scan_results': scan_results
+            }]
+            
+            # Send results to API
+            success = await self.api_client.send_session_result(
+                project_id=project_id,
+                flow_id=flow_id,
+                agent_history=agent_history,
+                s3_urls=s3_urls,
+                status='completed',
+                metadata={
+                    'scan_type': scan_type,
+                    'scanned_url': url,
+                    'scan_status': scan_results['status'],
+                    'screenshot_captured': len(s3_urls) > 0
+                }
+            )
+            
+            if success:
+                # Delete message from SQS on successful processing
+                await self.sqs_service.delete_message(receipt_handle)
+                logger.info(f"Successfully processed scanning message for project {project_id}, flow {flow_id}")
+            else:
+                logger.error(f"Failed to send scan results to API for project {project_id}, flow {flow_id}")
+                
+        finally:
+            # Clean up browser agent resources
+            browser_agent.cleanup_temp_files()
+
+    async def _process_automation_message(self, message: Dict):
+        """Process a regular browser automation message"""
+        project_id = message['project_id']
+        flow_id = message['flow_id']
+        url = message['url']
+        prompt = message['prompt']
+        receipt_handle = message['receipt_handle']
+            
+            # Initialize browser agent
+            browser_agent = BrowserAgentService()
+            
+            try:
+                # Run the browser automation task
+                logger.info(f"Running browser task: {prompt}")
+                await self.api_client.send_status_update(
+                    project_id, flow_id, 'in_progress', progress=10,
+                    message='Initializing browser agent'
+                )
+                
+                # Execute the task
+                agent_history, media_files, result_summary = await browser_agent.run_task(
+                    task_description=prompt,
+                    starting_url=url,
+                    timeout=int(os.getenv('DEFAULT_TIMEOUT', '300'))
+                )
+                
+                await self.api_client.send_status_update(
+                    project_id, flow_id, 'in_progress', progress=60,
+                    message='Task completed, uploading media files'
+                )
+                
+                # Upload media files to S3
+                s3_urls = []
+                if media_files:
+                    logger.info(f"Uploading {len(media_files)} media files to S3")
+                    
+                    upload_results = await self.s3_service.upload_multiple_files(
+                        file_paths=media_files,
+                        project_id=project_id,
+                        flow_id=flow_id,
+                        metadata={
+                            'task_prompt': prompt,
+                            'starting_url': url,
+                            'completion_time': datetime.now().isoformat()
+                        }
+                    )
+                    
+                    # Extract successful uploads
+                    s3_urls = [result['s3_url'] for result in upload_results if result['s3_url']]
+                    
+                    # Log upload results
+                    successful_uploads = len(s3_urls)
+                    failed_uploads = len(media_files) - successful_uploads
+                    logger.info(f"Uploaded {successful_uploads} files successfully, {failed_uploads} failed")
+                
+                await self.api_client.send_status_update(
+                    project_id, flow_id, 'in_progress', progress=90,
+                    message='Sending results to API'
+                )
+                
+                # Send results to API
+                success = await self.api_client.send_session_result(
+                    project_id=project_id,
+                    flow_id=flow_id,
+                    agent_history=agent_history,
+                    s3_urls=s3_urls,
+                    status='completed',
+                    metadata={
+                        'result_summary': result_summary,
+                        'media_file_count': len(media_files),
+                        'successful_uploads': len(s3_urls),
+                        'starting_url': url,
+                        'task_prompt': prompt
+                    }
+                )
+                
+                if success:
+                    # Delete message from SQS on successful processing
+                    await self.sqs_service.delete_message(receipt_handle)
+                    logger.info(f"Successfully processed automation message for project {project_id}, flow {flow_id}")
+                else:
+                    logger.error(f"Failed to send results to API for project {project_id}, flow {flow_id}")
+                    # Message will remain in SQS for retry
+                
+            finally:
+                # Clean up browser agent resources
+                browser_agent.cleanup_temp_files()
+                
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Error processing message for project {project_id}, flow {flow_id}: {error_msg}")
+            
+            try:
+                # Send error status to API
+                await self.api_client.send_session_result(
+                    project_id=project_id,
+                    flow_id=flow_id,
+                    agent_history=[{
+                        'timestamp': datetime.now().isoformat(),
+                        'type': 'error',
+                        'content': f'Task failed: {error_msg}'
+                    }],
+                    s3_urls=[],
+                    status='failed',
+                    error=error_msg,
+                    metadata={
+                        'starting_url': url,
+                        'task_prompt': prompt
+                    }
+                )
+                
+                # Delete message from SQS even on failure to prevent infinite retries
+                # In production, you might want to send to a DLQ instead
+                await self.sqs_service.delete_message(receipt_handle)
+                
+            except Exception as api_error:
+                logger.error(f"Failed to send error status to API: {str(api_error)}")
+
+    async def stop_processing(self):
+        """Stop processing messages"""
+        self.running = False
+        logger.info("Stopping message processing...")
+
+    async def health_check(self) -> Dict[str, bool]:
+        """Check health of all services"""
+        health_status = {
+            'sqs': self.sqs_service.health_check(),
+            's3': self.s3_service.health_check(),
+            'api': await self.api_client.health_check()
+        }
+        
+        logger.info(f"Health check results: {health_status}")
+        return health_status
+
+    async def close(self):
+        """Close all services"""
+        await self.api_client.close()
+        logger.info("Message processor closed")
